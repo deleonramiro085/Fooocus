@@ -1,12 +1,12 @@
 {
-    "default_model": "cyberrealisticPony_v160.safetensors",
+    "default_model": "hassakuXLIllustrious_v34.safetensors",
     "default_refiner": "None",
     "default_refiner_switch": 0.5,
     "default_loras": [
         [
             true,
-            "sd_xl_offset_example-lora_1.0.safetensors",
-            0.1
+            "PeoplesWorks_v9_Illusv1.0_128dim.safetensors",
+            1.0
         ],
         [ true, "None", 1.0 ],
         [ true, "None", 1.0 ],
@@ -21,18 +21,16 @@
     "default_prompt": "",
     "default_prompt_negative": "",
     "default_styles": [
-        "Fooocus V2",
-        "Fooocus Enhance",
-        "Fooocus Sharp"
+
     ],
     "default_aspect_ratio": "1152*896",
     "default_overwrite_step": -1,
     "checkpoint_downloads": {
-        "cyberrealisticPony_v160.safetensors": "https://huggingface.co/datasets/deleonramiro085/fav/resolve/main/cyberrealisticPony_v160.safetensors"
+        "hassakuXLIllustrious_v34.safetensors": "https://huggingface.co/datasets/deleonramiro085/fav/resolve/main/hassakuXLIllustrious_v34.safetensors"
     },
     "embeddings_downloads": {},
     "lora_downloads": {
-        "sd_xl_offset_example-lora_1.0.safetensors": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_offset_example-lora_1.0.safetensors"
+        "PeoplesWorks_v9_Illusv1.0_128dim.safetensors": "https://huggingface.co/datasets/deleonramiro085/LOL/resolve/main/PeoplesWorks_v9_Illusv1.0_128dim.safetensors"
     },
     "previous_default_models": [
         "juggernautXL_ragnarokBy.safetensors",
