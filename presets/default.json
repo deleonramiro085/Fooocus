@@ -19,7 +19,7 @@
     "default_scheduler": "karras",
     "default_performance": "Speed",
     "default_prompt": "",
-    "default_prompt_negative": "",
+    "default_prompt_negative": "worst quality, bad quality,",
     "default_styles": [
 
     ],
