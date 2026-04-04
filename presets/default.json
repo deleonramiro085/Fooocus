@@ -23,7 +23,7 @@
     "default_styles": [
 
     ],
-    "default_aspect_ratio": "1152*896",
+    "default_aspect_ratio": "832*1216",
     "default_overwrite_step": -1,
     "checkpoint_downloads": {
         "hassakuXLIllustrious_v34.safetensors": "https://huggingface.co/datasets/deleonramiro085/fav/resolve/main/hassakuXLIllustrious_v34.safetensors"
