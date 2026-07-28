@@ -26,7 +26,7 @@
     "default_aspect_ratio": "832*1216",
     "default_overwrite_step": -1,
     "checkpoint_downloads": {
-        "hassakuXLIllustrious_v34.safetensors": "https://huggingface.co/datasets/deleonramiro085/fav/resolve/main/cyberrealisticPony_v180Coreshift.safetensors"
+        "hassakuXLIllustrious_v34.safetensors": "https://huggingface.co/datasets/deleonramiro085/fav/resolve/main/hassakuXLIllustrious_v34.safetensors"
     },
     "embeddings_downloads": {},
     "lora_downloads": {
