@@ -30,7 +30,7 @@
     },
     "embeddings_downloads": {},
     "lora_downloads": {
-        "PeoplesWorks_v9_Illusv1.0_128dim.safetensors": "https://huggingface.co/datasets/deleonramiro085/LOL/resolve/main/PeoplesWorks_v9_Illusv1.0_128dim.safetensors"
+        "PeoplesWorks_v9_Illusv1.0_128dim.safetensors": "https://huggingface.co/datasets/deleonramiro085/LOL/resolve/main/PeoplesWorks_v10_Illusv1.0.safetensors"
     },
     "previous_default_models": [
         "juggernautXL_ragnarokBy.safetensors",
