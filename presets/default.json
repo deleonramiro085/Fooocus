@@ -3,7 +3,11 @@
     "default_refiner": "None",
     "default_refiner_switch": 0.5,
     "default_loras": [
-        [ true, "None", 1.0 ],
+        [
+            true,
+            "Smooth_Booster_v5.safetensors",
+            0.44
+        ],
         [ true, "None", 1.0 ],
         [ true, "None", 1.0 ],
         [ true, "None", 1.0 ],
@@ -26,7 +30,7 @@
     },
     "embeddings_downloads": {},
     "lora_downloads": {
-        "Smooth_Booster_v5.safetensors": "https://huggingface.co/datasets/deleonramiro085/fav/resolve/main/Smooth_Booster_v5.safetensors"
+        "Smooth_Booster_v5.safetensors": "https://huggingface.co/datasets/deleonramiro085/LOL/resolve/main/Smooth_Booster_v5.safetensors"
     },
     "previous_default_models": [
         "juggernautXL_ragnarokBy.safetensors",
