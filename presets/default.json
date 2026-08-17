@@ -16,22 +16,11 @@
     "default_performance": "Speed",
     "default_prompt": "",
     "default_prompt_negative": "worst quality, bad quality,",
-    "default_styles": [
-
-    ],
+    "default_styles": [],
     "default_aspect_ratio": "832*1216",
     "default_overwrite_step": -1,
-    "checkpoint_downloads": {
-        "cyberrealisticPony_v18": "https://huggingface.co/datasets/deleonramiro085/fav/resolve/main/cyberrealisticPony_v180Coreshift.safetensors"
-    },
+    "checkpoint_downloads": {},
     "embeddings_downloads": {},
     "lora_downloads": {},
-    "previous_default_models": [
-        "juggernautXL_ragnarokBy.safetensors",
-        "juggernautXL_version8Rundiffusion.safetensors",
-        "juggernautXL_version7Rundiffusion.safetensors",
-        "juggernautXL_v7Rundiffusion.safetensors",
-        "juggernautXL_version6Rundiffusion.safetensors",
-        "juggernautXL_v6Rundiffusion.safetensors"
-    ]
+    "previous_default_models": []
 }
