@@ -19,8 +19,12 @@
     "default_styles": [],
     "default_aspect_ratio": "832*1216",
     "default_overwrite_step": -1,
-    "checkpoint_downloads": {},
+    "default_clip_skip": 2,
+    "checkpoint_downloads": {
+        "cyberrealisticPony_v180Coreshift.safetensors": "https://huggingface.co/slot-sloop/frameyard-2884631-cyberrealistic-pony/resolve/main/cyberrealisticPony_v180Coreshift.safetensors"
+    },
     "embeddings_downloads": {},
     "lora_downloads": {},
+    "vae_downloads": {},
     "previous_default_models": []
 }
