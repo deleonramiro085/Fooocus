@@ -1,0 +1,15 @@
+# Extras opcionales: mascara automatica, quitar fondo, SAM + GroundingDINO.
+#
+# NO se instalan por defecto a proposito:
+#   - rembg fija Python <3.13 en sus versiones viejas y arrastra medio scikit-image.
+#   - groundingdino-py compila una extension CUDA al instalarse y falla con
+#     frecuencia segun el CUDA del runtime.
+# extras/inpaint_mask.py importa todo esto de forma perezosa, asi que si falla la
+# instalacion Fooocus arranca igual y solo pierde esa funcion.
+#
+# Instalacion:  python -m pip install -r requirements_optional.txt
+# En Colab:     marca la casilla EXTRAS_OPCIONALES del notebook.
+rembg
+segment_anything==1.0
+supervision
+groundingdino-py==0.4.0
