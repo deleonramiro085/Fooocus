@@ -13,49 +13,92 @@ os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
 if "GRADIO_SERVER_PORT" not in os.environ:
     os.environ["GRADIO_SERVER_PORT"] = "7865"
 
+# Menos fragmentacion de VRAM en GPUs chicas (T4 / L4 de Colab).
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+
 ssl._create_default_https_context = ssl._create_unverified_context
 
 import platform
 import fooocus_version
 
 from build_launcher import build_launcher
-from modules.launch_util import is_installed, run, python, run_pip, requirements_met, delete_folder_content
+from modules.launch_util import (delete_folder_content, installed_version, is_installed, python,
+                                 requirements_met, run, run_pip)
 from modules.model_loader import load_file_from_url
 
 REINSTALL_ALL = False
 TRY_INSTALL_XFORMERS = False
 
+# gradio 3.41.2 declara en su metadata numpy~=1.0 y pillow<11. Eso es imposible en
+# Python 3.13 (no hay wheels de numpy 1.x) y ademas destrozaria el runtime de Colab,
+# asi que se instala sin resolver dependencias: las reales viven en
+# requirements_versions.txt, ya auditadas una por una.
+NO_DEPS_PACKAGES = {
+    'gradio': '3.41.2',
+    'gradio_client': '0.5.0',
+}
+
+OPTIONAL_REQUIREMENTS_FILE = 'requirements_optional.txt'
+INSTALL_OPTIONAL_FLAG = '--install-optional'
+
 
 def prepare_environment():
-    torch_index_url = os.environ.get('TORCH_INDEX_URL', "https://download.pytorch.org/whl/cu121")
-    torch_command = os.environ.get('TORCH_COMMAND',
-                                   f"pip install torch==2.1.0 torchvision==0.16.0 --extra-index-url {torch_index_url}")
     requirements_file = os.environ.get('REQS_FILE', "requirements_versions.txt")
 
     print(f"Python {sys.version}")
     print(f"Fooocus version: {fooocus_version.version}")
 
     if REINSTALL_ALL or not is_installed("torch") or not is_installed("torchvision"):
-        run(f'"{python}" -m {torch_command}', "Installing torch and torchvision", "Couldn't install torch", live=True)
+        torch_index_url = os.environ.get('TORCH_INDEX_URL', "https://download.pytorch.org/whl/cu128")
+        torch_command = os.environ.get(
+            'TORCH_COMMAND', f"pip install torch torchvision --extra-index-url {torch_index_url}")
+        run(f'"{python}" -m {torch_command}', "Installing torch and torchvision",
+            "Couldn't install torch", live=True)
+    else:
+        # Reinstalar torch sobre un runtime que ya trae CUDA es la causa numero uno
+        # de "Torch not compiled with CUDA enabled" en Colab. Se usa el que ya esta.
+        print(f'Using pre-installed torch {installed_version("torch")} '
+              f'and torchvision {installed_version("torchvision")}.')
 
     if TRY_INSTALL_XFORMERS:
         if REINSTALL_ALL or not is_installed("xformers"):
-            xformers_package = os.environ.get('XFORMERS_PACKAGE', 'xformers==0.0.23')
+            xformers_package = os.environ.get('XFORMERS_PACKAGE', 'xformers')
             if platform.system() == "Windows":
                 if platform.python_version().startswith("3.10"):
                     run_pip(f"install -U -I --no-deps {xformers_package}", "xformers", live=True)
                 else:
                     print("Installation of xformers is not supported in this version of Python.")
-                    print(
-                        "You can also check this and build manually: https://github.com/AUTOMATIC1111/stable-diffusion-webui/wiki/Xformers#building-xformers-on-windows-by-duckness")
                     if not is_installed("xformers"):
                         exit(0)
             elif platform.system() == "Linux":
                 run_pip(f"install -U -I --no-deps {xformers_package}", "xformers")
 
     if REINSTALL_ALL or not requirements_met(requirements_file):
-        run_pip(f"install -r \"{requirements_file}\"", "requirements")
+        run_pip(f'install -r "{requirements_file}"', "requirements", live=True)
 
+    for package, version in NO_DEPS_PACKAGES.items():
+        if REINSTALL_ALL or installed_version(package) != version:
+            run_pip(f'install --no-deps --force-reinstall {package}=={version}',
+                    f'{package}=={version} (--no-deps)', live=True)
+
+    if not is_installed('cv2'):
+        run_pip('install opencv-contrib-python-headless', 'opencv', live=True)
+
+    if INSTALL_OPTIONAL_FLAG in sys.argv:
+        # Se saca de argv antes de que argparse lo vea.
+        sys.argv.remove(INSTALL_OPTIONAL_FLAG)
+        if os.path.exists(OPTIONAL_REQUIREMENTS_FILE):
+            run_pip(f'install -r "{OPTIONAL_REQUIREMENTS_FILE}"',
+                    'extras opcionales (rembg / segment_anything / GroundingDINO)', live=True)
+    return
+
+
+def prepare_compatibility():
+    from modules.compat import apply_compatibility_patches, print_environment_report
+    apply_compatibility_patches()
+    print_environment_report()
     return
 
 
@@ -73,6 +116,7 @@ def ini_args():
 
 
 prepare_environment()
+prepare_compatibility()
 build_launcher()
 args = ini_args()
 
@@ -100,13 +144,27 @@ if config.temp_path_cleanup_on_launch:
         print(f"[Cleanup] Failed to delete content of temp dir.")
 
 
-def download_models(default_model, previous_default_models, checkpoint_downloads, embeddings_downloads, lora_downloads, vae_downloads):
+def download_or_warn(url, model_dir, file_name):
+    """Descarga tolerante a fallos: un mirror caido ya no impide arrancar Fooocus."""
+    try:
+        return load_file_from_url(url=url, model_dir=model_dir, file_name=file_name)
+    except Exception as e:
+        print(f'[Downloader] No se pudo descargar "{file_name}".')
+        print(f'[Downloader] URL: {url}')
+        print(f'[Downloader] Motivo: {e}')
+        print('[Downloader] Fooocus sigue arrancando; la funcion que use ese archivo '
+              'fallara hasta que exista.')
+        return None
+
+
+def download_models(default_model, previous_default_models, checkpoint_downloads, embeddings_downloads,
+                    lora_downloads, vae_downloads):
     from modules.util import get_file_from_folder_list
 
     for file_name, url in vae_approx_filenames:
-        load_file_from_url(url=url, model_dir=config.path_vae_approx, file_name=file_name)
+        download_or_warn(url=url, model_dir=config.path_vae_approx, file_name=file_name)
 
-    load_file_from_url(
+    download_or_warn(
         url='https://huggingface.co/lllyasviel/misc/resolve/main/fooocus_expansion.bin',
         model_dir=config.path_fooocus_expansion,
         file_name='pytorch_model.bin'
@@ -130,14 +188,14 @@ def download_models(default_model, previous_default_models, checkpoint_downloads
 
     for file_name, url in checkpoint_downloads.items():
         model_dir = os.path.dirname(get_file_from_folder_list(file_name, config.paths_checkpoints))
-        load_file_from_url(url=url, model_dir=model_dir, file_name=file_name)
+        download_or_warn(url=url, model_dir=model_dir, file_name=file_name)
     for file_name, url in embeddings_downloads.items():
-        load_file_from_url(url=url, model_dir=config.path_embeddings, file_name=file_name)
+        download_or_warn(url=url, model_dir=config.path_embeddings, file_name=file_name)
     for file_name, url in lora_downloads.items():
         model_dir = os.path.dirname(get_file_from_folder_list(file_name, config.paths_loras))
-        load_file_from_url(url=url, model_dir=model_dir, file_name=file_name)
+        download_or_warn(url=url, model_dir=model_dir, file_name=file_name)
     for file_name, url in vae_downloads.items():
-        load_file_from_url(url=url, model_dir=config.path_vae, file_name=file_name)
+        download_or_warn(url=url, model_dir=config.path_vae, file_name=file_name)
 
     return default_model, checkpoint_downloads
 
@@ -147,6 +205,14 @@ config.default_base_model_name, config.checkpoint_downloads = download_models(
     config.embeddings_downloads, config.lora_downloads, config.vae_downloads)
 
 config.update_files()
+
+if len(config.model_filenames) == 0:
+    print('!' * 72)
+    print('[Fooocus] No hay ningun checkpoint en models/checkpoints.')
+    print(f'[Fooocus] Se esperaba: {config.default_base_model_name}')
+    print('[Fooocus] Revisa "checkpoint_downloads" en presets/default.json o copia el modelo a mano.')
+    print('!' * 72)
+
 init_cache(config.model_filenames, config.paths_checkpoints, config.lora_filenames, config.paths_loras)
 
 from webui import *

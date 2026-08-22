@@ -1,13 +1,29 @@
+import importlib
 import sys
 
-import modules.config
 import numpy as np
 import torch
-from extras.GroundingDINO.util.inference import default_groundingdino
-from extras.sam.predictor import SamPredictor
-from rembg import remove, new_session
-from segment_anything import sam_model_registry
-from segment_anything.utils.amg import remove_small_regions
+
+import modules.config
+
+OPTIONAL_HINT = (
+    'Los extras de mascara automatica (rembg / segment_anything / GroundingDINO) no estan instalados.\n'
+    'Instalalos con:  python -m pip install -r requirements_optional.txt\n'
+    'En Colab: marca la casilla "EXTRAS_OPCIONALES" del notebook y vuelve a ejecutar la celda.'
+)
+
+
+def _load(module_name: str):
+    """Import perezoso.
+
+    Antes estos imports estaban arriba del modulo y, como modules/async_worker.py
+    importa este archivo al arrancar, una dependencia opcional que faltara (o que no
+    compilara, tipico de groundingdino-py) tumbaba TODO Fooocus antes de abrir la UI.
+    """
+    try:
+        return importlib.import_module(module_name)
+    except Exception as e:
+        raise ImportError(f'No se pudo importar "{module_name}": {e}\n\n{OPTIONAL_HINT}') from e
 
 
 class SAMOptions:
@@ -36,6 +52,7 @@ def optimize_masks(masks: torch.Tensor) -> torch.Tensor:
     """
     removes small disconnected regions and holes
     """
+    remove_small_regions = _load('segment_anything.utils.amg').remove_small_regions
     fine_masks = []
     for mask in masks.to('cpu').numpy():  # masks: [num_masks, 1, h, w]
         fine_masks.append(remove_small_regions(mask[0], 400, mode="holes")[0])
@@ -59,14 +76,19 @@ def generate_mask_from_image(image: np.ndarray, mask_model: str = 'sam', extras=
         image = image['image']
 
     if mask_model != 'sam' or sam_options is None:
-        result = remove(
+        rembg = _load('rembg')
+        result = rembg.remove(
             image,
-            session=new_session(mask_model, **extras),
+            session=rembg.new_session(mask_model, **extras),
             only_mask=True,
             **extras
         )
 
         return result, dino_detection_count, sam_detection_count, sam_detection_on_mask_count
+
+    default_groundingdino = _load('extras.GroundingDINO.util.inference').default_groundingdino
+    sam_predictor_cls = _load('extras.sam.predictor').SamPredictor
+    sam_model_registry = _load('segment_anything').sam_model_registry
 
     detections, boxes, logits, phrases = default_groundingdino(
         image=image,
@@ -83,7 +105,7 @@ def generate_mask_from_image(image: np.ndarray, mask_model: str = 'sam', extras=
     sam_checkpoint = modules.config.download_sam_model(sam_options.model_type)
     sam = sam_model_registry[sam_options.model_type](checkpoint=sam_checkpoint)
 
-    sam_predictor = SamPredictor(sam)
+    sam_predictor = sam_predictor_cls(sam)
     final_mask_tensor = torch.zeros((image.shape[0], image.shape[1]))
     dino_detection_count = boxes.size(0)
 
