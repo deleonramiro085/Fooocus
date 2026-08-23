@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import select
 import shutil
 import socket
 import stat
@@ -67,12 +68,17 @@ def install_system_tools() -> None:
             "cloudflared-linux-amd64",
         ])
         cloudflared.chmod(cloudflared.stat().st_mode | stat.S_IEXEC)
+    if not os.access(cloudflared, os.X_OK):
+        cloudflared.chmod(cloudflared.stat().st_mode | stat.S_IEXEC)
 
 
 def safetensors_header_is_valid(path: Path) -> bool:
     try:
         with path.open("rb") as handle:
-            header_size = int.from_bytes(handle.read(8), "little")
+            raw_size = handle.read(8)
+            if len(raw_size) != 8:
+                return False
+            header_size = int.from_bytes(raw_size, "little")
             if not 2 <= header_size <= 100_000_000:
                 return False
             header = json.loads(handle.read(header_size))
@@ -90,17 +96,23 @@ def aria2_download(url: str, destination: Path, minimum_bytes: int, *, safetenso
         print(f"[Modelo] Ya existe: {destination.name}", flush=True)
         return
 
+    # Nunca dejamos que aria2 trate un archivo corrupto como una descarga completa.
+    partial = destination.with_name(destination.name + ".part")
+    if destination.exists():
+        destination.unlink()
     print(f"[Modelo] Descargando {destination.name}", flush=True)
     run([
         "aria2c", "--console-log-level=notice", "--summary-interval=5", "-c",
         "-x", "16", "-s", "16", "-k", "1M", "--file-allocation=none",
-        "--dir", str(destination.parent), "--out", destination.name, url,
+        "--dir", str(partial.parent), "--out", partial.name, url,
     ])
 
-    if not destination.exists() or destination.stat().st_size < minimum_bytes:
-        raise RuntimeError(f"Descarga incompleta: {destination}")
-    if safetensors and not safetensors_header_is_valid(destination):
-        raise RuntimeError(f"Cabecera safetensors inválida: {destination}")
+    if not partial.exists() or partial.stat().st_size < minimum_bytes:
+        raise RuntimeError(f"Descarga incompleta: {partial}")
+    if safetensors and not safetensors_header_is_valid(partial):
+        raise RuntimeError(f"Cabecera safetensors inválida: {partial}")
+    os.replace(partial, destination)
+    print(f"[Modelo] Validado: {destination.name}", flush=True)
 
 
 def wait_for_ui(process: subprocess.Popen, timeout: int = 1_200) -> None:
@@ -120,8 +132,9 @@ def wait_for_ui(process: subprocess.Popen, timeout: int = 1_200) -> None:
 
 
 def start_cloudflare() -> tuple[subprocess.Popen, str]:
+    cloudflared = "/usr/local/bin/cloudflared"
     process = subprocess.Popen(
-        ["cloudflared", "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{PORT}"],
+        [cloudflared, "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{PORT}"],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -131,23 +144,27 @@ def start_cloudflare() -> tuple[subprocess.Popen, str]:
     deadline = time.monotonic() + 90
     url = ""
     while time.monotonic() < deadline:
+        ready, _, _ = select.select([process.stdout], [], [], 1)
+        if not ready:
+            if process.poll() is not None:
+                break
+            continue
         line = process.stdout.readline()
-        if line:
-            print(f"[Cloudflare] {line.rstrip()}", flush=True)
-            for token in line.split():
-                clean = token.strip("()[]<>,.\"'")
-                if clean.startswith("https://") and clean.endswith(".trycloudflare.com"):
-                    url = clean
-                    break
-        elif process.poll() is not None:
-            break
-        else:
-            time.sleep(0.1)
+        if not line:
+            if process.poll() is not None:
+                break
+            continue
+        print(f"[Cloudflare] {line.rstrip()}", flush=True)
+        for token in line.split():
+            clean = token.strip("()[]<>,.\"'")
+            if clean.startswith("https://") and clean.endswith(".trycloudflare.com"):
+                url = clean
+                break
         if url:
             break
     if not url:
         process.terminate()
-        raise RuntimeError("Cloudflare no entregó una URL pública.")
+        raise RuntimeError("Cloudflare no entregó una URL pública en 90 segundos.")
 
     def drain() -> None:
         assert process.stdout is not None
