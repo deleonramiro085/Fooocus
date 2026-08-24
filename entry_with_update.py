@@ -5,6 +5,16 @@ root = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(root)
 os.chdir(root)
 
+# En Colab (y en cualquier consola redirigida) Python bufferiza la salida en bloques de
+# 8 KB, asi que un arranque de varios minutos parece colgado cuando en realidad esta
+# descargando. Con esto cada linea sale en cuanto se imprime.
+os.environ.setdefault('PYTHONUNBUFFERED', '1')
+for stream in (sys.stdout, sys.stderr):
+    try:
+        stream.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
 SKIP_UPDATE_FLAG = '--skip-update'
 
 skip_update = os.environ.get('FOOOCUS_SKIP_UPDATE', '0') == '1'
