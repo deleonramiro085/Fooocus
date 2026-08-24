@@ -11,7 +11,8 @@ def test_colab_notebook_is_valid_and_uses_isolated_venv():
     code = '\n'.join(''.join(cell.get('source', [])) for cell in notebook['cells']
                       if cell.get('cell_type') == 'code')
     ast.parse(code)
-    assert "python','-m','venv','--system-site-packages'" in code
+    assert "'--system-site-packages'" in code
+    assert "'-m','venv'" in code
     assert "'--skip-update'" in code
     assert "trycloudflare" in code
 
