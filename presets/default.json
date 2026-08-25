@@ -35,7 +35,7 @@
     "default_scheduler": "karras",
     "default_performance": "Speed",
     "default_prompt": "",
-    "default_prompt_negative": "",
+    "default_prompt_negative": "(worst quality:1.2), (low quality:1.2), watermark, signature",
     "default_styles": [],
     "default_aspect_ratio": "896*1152",
     "default_save_metadata_to_images": true,
