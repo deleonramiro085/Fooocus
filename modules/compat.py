@@ -8,9 +8,16 @@ numerico. Se aplica una sola vez, al arrancar, desde launch.py.
 """
 
 import functools
+import os
 import platform
 import sys
 import types
+
+# Lado mayor al que se reescala el preview antes de mandarlo al navegador.
+# 0 desactiva el reescalado.
+PREVIEW_MAX_SIDE = int(os.environ.get('FOOOCUS_PREVIEW_MAX_SIDE', '768'))
+PREVIEW_FORMAT = os.environ.get('FOOOCUS_PREVIEW_FORMAT', 'jpeg').lower()
+PREVIEW_QUALITY = int(os.environ.get('FOOOCUS_PREVIEW_QUALITY', '82'))
 
 
 def _patch_numpy():
@@ -43,9 +50,7 @@ def _patch_numpy():
         np.asfarray = lambda a, dtype=np.float64: np.asarray(a, dtype=dtype)
 
     # numpy 2.0 retiro toda la familia sctype. La usa el codigo estilo scikit-image que
-    # gradio 3.41 lleva vendorizado en processing_utils._convert (primera linea:
-    # np.issubdtype(dtype_in, np.obj2sctype(dtype))). Sin esto, la primera preview del
-    # sampler lanza AttributeError y el evento de gradio muere con "Error".
+    # gradio 3.41 lleva vendorizado en processing_utils._convert.
     if not hasattr(np, 'obj2sctype'):
         def obj2sctype(rep, default=None):
             try:
@@ -77,13 +82,41 @@ def _patch_numpy():
     return
 
 
-def _patch_gradio():
-    """Codifica los previews sin pasar por processing_utils._convert.
+def _to_uint8(array):
+    import numpy as np
 
-    _convert es una copia de las conversiones de dtype de scikit-image y arrastra APIs
-    de numpy 1.x. Para lo que Fooocus necesita (mandar un array de imagen al navegador)
-    basta normalizar a uint8 y dejar que Pillow serialice el PNG, asi que se sustituye
-    la funcion completa en vez de ir parcheando numpy pieza a pieza.
+    array = np.asarray(array)
+    if array.dtype == np.uint8:
+        return array
+    if array.dtype in (bool, np.bool_):
+        return array.astype(np.uint8) * 255
+    if array.dtype.kind == 'f':
+        finite = array[np.isfinite(array)] if array.size else array
+        peak = float(finite.max()) if finite.size else 0.0
+        scale = 255.0 if peak <= 1.0 else 1.0
+        return np.clip(np.rint(np.nan_to_num(array.astype(np.float32)) * scale), 0, 255).astype(np.uint8)
+    if array.dtype.kind in 'iu':
+        info = np.iinfo(array.dtype)
+        if info.max > 255:
+            return np.clip(array.astype(np.float32) * (255.0 / info.max), 0, 255).astype(np.uint8)
+        return np.clip(array, 0, 255).astype(np.uint8)
+    return np.clip(np.asarray(array, dtype=np.float32), 0, 255).astype(np.uint8)
+
+
+def _patch_gradio():
+    """Hace utilizable gradio 3.41 sobre numpy 2 y aligera los previews.
+
+    Dos problemas distintos, mismo origen (gradio 3.41 es de 2023):
+
+    1. `processing_utils._convert` es una copia de las conversiones de dtype de
+       scikit-image y llama a APIs retiradas en numpy 2 (obj2sctype, find_common_type,
+       sctypes). La usan `Image.postprocess` y `Gallery.img_array_to_temp_file`, o sea
+       tanto el preview como la miniatura final.
+
+    2. `encode_array_to_base64` serializa el array como PNG a resolucion completa. Con
+       896x1152 son ~2 MB por paso de sampler; sobre un tunel el websocket se satura y
+       el ultimo mensaje (`results`, el que pinta la miniatura) se pierde sin error.
+       Reescalar a 768 px y usar JPEG deja el mensaje en ~50 KB.
     """
     import base64
     from io import BytesIO
@@ -92,31 +125,60 @@ def _patch_gradio():
     from PIL import Image as _PILImage
     from gradio import processing_utils
 
-    if getattr(processing_utils, '_fooocus_numpy_safe_encoder', False):
+    if getattr(processing_utils, '_fooocus_patched', False):
         return
 
-    def encode_array_to_base64(image_array):
-        array = np.asarray(image_array)
-        if array.dtype == np.uint8:
-            prepared = array
-        elif array.dtype == bool or array.dtype == np.bool_:
-            prepared = array.astype(np.uint8) * 255
-        elif array.dtype.kind == 'f':
-            scale = 255.0 if float(np.nanmax(array, initial=0.0)) <= 1.0 else 1.0
-            prepared = np.clip(np.rint(array.astype(np.float32) * scale), 0, 255).astype(np.uint8)
-        else:
-            prepared = np.clip(array, 0, 255).astype(np.uint8)
+    def _convert(image, dtype, force_copy=False, uniform=False):
+        del uniform
+        array = np.asarray(image)
+        target = np.dtype('float64') if dtype is np.floating else np.dtype(dtype)
+        if array.dtype == target:
+            return array.copy() if force_copy else array
+        if target == np.dtype(np.uint8):
+            return _to_uint8(array)
+        if target.kind == 'f':
+            source = _to_uint8(array) if array.dtype.kind in 'ui' and array.dtype != np.uint8 else array
+            if source.dtype.kind in 'ui':
+                info = np.iinfo(source.dtype)
+                return (source.astype(target) / float(info.max))
+            return source.astype(target)
+        return array.astype(target)
 
+    def _prepare_for_transport(array):
+        prepared = _to_uint8(array)
         if prepared.ndim == 3 and prepared.shape[2] == 1:
             prepared = prepared[:, :, 0]
+        image = _PILImage.fromarray(prepared)
 
-        with BytesIO() as output_bytes:
-            _PILImage.fromarray(prepared).save(output_bytes, 'PNG')
-            payload = base64.b64encode(output_bytes.getvalue())
-        return 'data:image/png;base64,' + payload.decode('utf-8')
+        if PREVIEW_MAX_SIDE > 0:
+            longest = max(image.size)
+            if longest > PREVIEW_MAX_SIDE:
+                ratio = PREVIEW_MAX_SIDE / float(longest)
+                image = image.resize((max(1, int(image.width * ratio)),
+                                      max(1, int(image.height * ratio))),
+                                     _PILImage.BILINEAR)
 
+        has_alpha = image.mode in ('RGBA', 'LA', 'P')
+        if PREVIEW_FORMAT in ('jpeg', 'jpg') and not has_alpha:
+            if image.mode not in ('RGB', 'L'):
+                image = image.convert('RGB')
+            return image, 'JPEG', 'image/jpeg', {'quality': PREVIEW_QUALITY, 'optimize': True}
+        return image, 'PNG', 'image/png', {'compress_level': 6}
+
+    def encode_array_to_base64(image_array):
+        image, pil_format, mime, options = _prepare_for_transport(image_array)
+        with BytesIO() as buffer:
+            image.save(buffer, pil_format, **options)
+            payload = base64.b64encode(buffer.getvalue())
+        return f'data:{mime};base64,' + payload.decode('utf-8')
+
+    processing_utils._convert = _convert
     processing_utils.encode_array_to_base64 = encode_array_to_base64
-    processing_utils._fooocus_numpy_safe_encoder = True
+    processing_utils._fooocus_patched = True
+
+    if PREVIEW_MAX_SIDE > 0:
+        print(f'[Compat] Previews limitados a {PREVIEW_MAX_SIDE} px '
+              f'({PREVIEW_FORMAT}) para no saturar el tunel.', flush=True)
     return
 
 
