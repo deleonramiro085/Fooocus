@@ -28,8 +28,18 @@ def is_installed(package):
         spec = importlib.util.find_spec(package)
     except ModuleNotFoundError:
         return False
+    except Exception:
+        return False
 
     return spec is not None
+
+
+def installed_version(package):
+    """Version instalada de un paquete, o None. No importa el modulo (barato y sin efectos)."""
+    try:
+        return importlib.metadata.version(package)
+    except Exception:
+        return None
 
 
 def run(command, desc=None, errdesc=None, custom_env=None, live: bool = default_command_live) -> str:
@@ -76,26 +86,41 @@ def run_pip(command, desc=None, live=default_command_live):
 
 
 def requirements_met(requirements_file):
+    """True si todas las lineas del archivo ya estan satisfechas.
+
+    Soporta cualquier especificador (>=, <, ==, rangos), no solo ==, para poder
+    trabajar contra un runtime como Colab donde casi todo viene preinstalado.
+    """
+    missing = []
+
     with open(requirements_file, "r", encoding="utf8") as file:
         for line in file:
             line = line.strip()
             if line == "" or line.startswith('#'):
                 continue
 
-            requirement = Requirement(line)
-            package = requirement.name
+            try:
+                requirement = Requirement(line)
+            except Exception as e:
+                print(f"Skipping unparsable requirement line: {line} ({e})")
+                continue
+
+            version = installed_version(requirement.name)
+            if version is None:
+                missing.append(f"{requirement.name} (no instalado)")
+                continue
 
             try:
-                version_installed = importlib.metadata.version(package)
-                installed_version = packaging.version.parse(version_installed)
-
-                # Check if the installed version satisfies the requirement
-                if installed_version not in requirement.specifier:
-                    print(f"Version mismatch for {package}: Installed version {version_installed} does not meet requirement {requirement}")
-                    return False
+                if packaging.version.parse(version) not in requirement.specifier:
+                    missing.append(f"{requirement.name} {version} no cumple {requirement.specifier}")
             except Exception as e:
-                print(f"Error checking version for {package}: {e}")
-                return False
+                missing.append(f"{requirement.name} (no se pudo comparar: {e})")
+
+    if len(missing) > 0:
+        print(f"Requirements pendientes ({len(missing)}):")
+        for item in missing:
+            print(f"  - {item}")
+        return False
 
     return True
 
