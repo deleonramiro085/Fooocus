@@ -41,6 +41,82 @@ def _patch_numpy():
         np.in1d = lambda ar1, ar2, **kwargs: np.isin(np.asarray(ar1).ravel(), ar2, **kwargs)
     if not hasattr(np, 'asfarray'):
         np.asfarray = lambda a, dtype=np.float64: np.asarray(a, dtype=dtype)
+
+    # numpy 2.0 retiro toda la familia sctype. La usa el codigo estilo scikit-image que
+    # gradio 3.41 lleva vendorizado en processing_utils._convert (primera linea:
+    # np.issubdtype(dtype_in, np.obj2sctype(dtype))). Sin esto, la primera preview del
+    # sampler lanza AttributeError y el evento de gradio muere con "Error".
+    if not hasattr(np, 'obj2sctype'):
+        def obj2sctype(rep, default=None):
+            try:
+                if isinstance(rep, type) and issubclass(rep, np.generic):
+                    return rep
+                return np.dtype(rep).type
+            except Exception:
+                return default
+
+        np.obj2sctype = obj2sctype
+
+    if not hasattr(np, 'issctype'):
+        np.issctype = lambda rep: np.obj2sctype(rep) is not None
+    if not hasattr(np, 'maximum_sctype'):
+        np.maximum_sctype = lambda t: np.dtype(t).type
+    if not hasattr(np, 'sctype2char'):
+        np.sctype2char = lambda sctype: np.dtype(sctype).char
+    if not hasattr(np, 'find_common_type'):
+        np.find_common_type = lambda array_types, scalar_types: np.result_type(
+            *(list(array_types) + list(scalar_types)))
+    if not hasattr(np, 'sctypes'):
+        np.sctypes = {
+            'int': [np.int8, np.int16, np.int32, np.int64],
+            'uint': [np.uint8, np.uint16, np.uint32, np.uint64],
+            'float': [np.float16, np.float32, np.float64],
+            'complex': [np.complex64, np.complex128],
+            'others': [bool, object, bytes, str, np.void],
+        }
+    return
+
+
+def _patch_gradio():
+    """Codifica los previews sin pasar por processing_utils._convert.
+
+    _convert es una copia de las conversiones de dtype de scikit-image y arrastra APIs
+    de numpy 1.x. Para lo que Fooocus necesita (mandar un array de imagen al navegador)
+    basta normalizar a uint8 y dejar que Pillow serialice el PNG, asi que se sustituye
+    la funcion completa en vez de ir parcheando numpy pieza a pieza.
+    """
+    import base64
+    from io import BytesIO
+
+    import numpy as np
+    from PIL import Image as _PILImage
+    from gradio import processing_utils
+
+    if getattr(processing_utils, '_fooocus_numpy_safe_encoder', False):
+        return
+
+    def encode_array_to_base64(image_array):
+        array = np.asarray(image_array)
+        if array.dtype == np.uint8:
+            prepared = array
+        elif array.dtype == bool or array.dtype == np.bool_:
+            prepared = array.astype(np.uint8) * 255
+        elif array.dtype.kind == 'f':
+            scale = 255.0 if float(np.nanmax(array, initial=0.0)) <= 1.0 else 1.0
+            prepared = np.clip(np.rint(array.astype(np.float32) * scale), 0, 255).astype(np.uint8)
+        else:
+            prepared = np.clip(array, 0, 255).astype(np.uint8)
+
+        if prepared.ndim == 3 and prepared.shape[2] == 1:
+            prepared = prepared[:, :, 0]
+
+        with BytesIO() as output_bytes:
+            _PILImage.fromarray(prepared).save(output_bytes, 'PNG')
+            payload = base64.b64encode(output_bytes.getvalue())
+        return 'data:image/png;base64,' + payload.decode('utf-8')
+
+    processing_utils.encode_array_to_base64 = encode_array_to_base64
+    processing_utils._fooocus_numpy_safe_encoder = True
     return
 
 
@@ -86,7 +162,7 @@ def _patch_pillow():
 
 
 def apply_compatibility_patches():
-    for patch in (_patch_numpy, _patch_torch, _patch_pillow):
+    for patch in (_patch_numpy, _patch_torch, _patch_pillow, _patch_gradio):
         try:
             patch()
         except Exception as e:
