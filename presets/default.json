@@ -39,7 +39,7 @@
     "default_styles": [],
     "default_aspect_ratio": "896*1152",
     "default_save_metadata_to_images": true,
-    "default_output_format": "png",
+    "default_output_format": "webp",
     "default_steps": 26,
     "checkpoint_downloads": {},
     "embeddings_downloads": {},
