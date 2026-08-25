@@ -1,4 +1,4 @@
-# Fooocus 2.5.6 - Colab Edition
+# Fooocus 2.6 - Colab Edition
 
 Auditoria y arreglo de este fork para que funcione en el runtime **actual** de Google Colab.
 
