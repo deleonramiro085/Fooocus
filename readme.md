@@ -5,11 +5,11 @@
 ### Fooocus actualizado para Google Colab moderno
 
 [![Versión](https://img.shields.io/badge/versión-2.6.0-7c3aed)](./fooocus_version.py)
-[![Google Colab](https://img.shields.io/badge/Google_Colab-T4-F9AB00?logo=googlecolab&logoColor=white)](https://colab.research.google.com/github/deleonramiro085/Fooocus/blob/colab-2.5.6/fooocus_colab.ipynb)
+[![Google Colab](https://img.shields.io/badge/Google_Colab-T4-F9AB00?logo=googlecolab&logoColor=white)](https://colab.research.google.com/github/deleonramiro085/Fooocus/blob/main/fooocus_colab.ipynb)
 [![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/licencia-GPL--3.0-blue)](./LICENSE)
 
-**[Abrir Fooocus 2.6 en Google Colab](https://colab.research.google.com/github/deleonramiro085/Fooocus/blob/colab-2.5.6/fooocus_colab.ipynb)**
+**[Abrir Fooocus 2.6 en Google Colab](https://colab.research.google.com/github/deleonramiro085/Fooocus/blob/main/fooocus_colab.ipynb)**
 
 </div>
 
@@ -37,7 +37,7 @@ El objetivo es simple: ejecutar una celda, ver qué está ocurriendo y obtener u
 
 ## Inicio rápido
 
-1. Abre el [notebook oficial de este fork](https://colab.research.google.com/github/deleonramiro085/Fooocus/blob/colab-2.5.6/fooocus_colab.ipynb).
+1. Abre el [notebook oficial de este fork](https://colab.research.google.com/github/deleonramiro085/Fooocus/blob/main/fooocus_colab.ipynb).
 2. En Colab, selecciona **Entorno de ejecución > Cambiar tipo de entorno de ejecución > GPU T4**.
 3. Pega una URL directa de Hugging Face en `MODEL_URL`.
 4. Si el archivo tiene otro nombre, ajusta `MODEL_FILENAME`. El preset predeterminado espera `model.safetensors`.
@@ -68,7 +68,7 @@ Algunas funciones avanzadas descargan modelos adicionales cuando se usan por pri
 ## Uso manual de la rama
 
 ```bash
-git clone --depth 1 --branch colab-2.5.6 --single-branch \
+git clone --depth 1 --branch main --single-branch \
   https://github.com/deleonramiro085/Fooocus.git
 cd Fooocus
 python -u entry_with_update.py --skip-update --share --preset default
