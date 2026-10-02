@@ -20,13 +20,14 @@ def download_with_aria2c(binary: str, url: str, model_dir: str, file_name: str) 
     """Download with resume and parallel connections, returning success only when complete."""
     target = os.path.join(model_dir, file_name)
     partial = f'{target}.aria2'
+    on_drive = os.path.realpath(model_dir).startswith('/content/drive')
     command = [
         binary, '--console-log-level=warn', '--summary-interval=15',
         '--continue=true', '--allow-overwrite=true', '--auto-file-renaming=false',
-        '--check-integrity=true',
         f'--max-connection-per-server={ARIA2_CONNECTIONS}',
         f'--split={ARIA2_CONNECTIONS}', '--min-split-size=1M',
         '--max-tries=5', '--retry-wait=3', '--timeout=60',
+        '--file-allocation=' + ('none' if on_drive else 'falloc'),
         '--dir', model_dir, '--out', file_name, url,
     ]
     print(f'[Downloader] aria2c, {ARIA2_CONNECTIONS} conexiones -> {file_name}', flush=True)
@@ -56,8 +57,14 @@ def load_file_from_url(url: str, *, model_dir: str, progress: bool = True,
     if not file_name:
         file_name = os.path.basename(urlparse(url).path)
     cached_file = os.path.abspath(os.path.join(model_dir, file_name))
-    if os.path.isfile(cached_file) and os.path.getsize(cached_file) > 0:
+    # aria2c preasigna el archivo a su tamano final antes de bajar un solo byte:
+    # si una descarga anterior se corto, el archivo existe y pesa "lo correcto"
+    # pero esta lleno de ceros. El archivo de control .aria2 delata el caso.
+    incomplete = os.path.exists(cached_file + '.aria2')
+    if os.path.isfile(cached_file) and os.path.getsize(cached_file) > 0 and not incomplete:
         return cached_file
+    if incomplete:
+        print(f'[Downloader] Descarga anterior incompleta de {file_name}; se reanuda.', flush=True)
     print(f'Downloading: "{url}" to {cached_file}\n', flush=True)
     binary = aria2c_path()
     if binary is not None and download_with_aria2c(binary, url, os.path.dirname(cached_file),

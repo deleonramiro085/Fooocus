@@ -90,12 +90,15 @@ def requirements_met(requirements_file):
 
     Soporta cualquier especificador (>=, <, ==, rangos), no solo ==, para poder
     trabajar contra un runtime como Colab donde casi todo viene preinstalado.
+    Las lineas con marcador de entorno (`; python_version >= "3.13"`) que no
+    aplican a este interprete se ignoran: si no, pip se relanzaria en cada
+    arranque por un paquete que nunca va a instalar.
     """
     missing = []
 
     with open(requirements_file, "r", encoding="utf8") as file:
         for line in file:
-            line = line.strip()
+            line = line.split(' #', 1)[0].strip()
             if line == "" or line.startswith('#'):
                 continue
 
@@ -104,6 +107,12 @@ def requirements_met(requirements_file):
             except Exception as e:
                 print(f"Skipping unparsable requirement line: {line} ({e})")
                 continue
+
+            try:
+                if requirement.marker is not None and not requirement.marker.evaluate():
+                    continue
+            except Exception:
+                pass
 
             version = installed_version(requirement.name)
             if version is None:

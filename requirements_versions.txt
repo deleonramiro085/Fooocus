@@ -38,3 +38,6 @@ semantic-version>=2.0
 importlib-resources>=1.3,<7
 ffmpy
 pydub
+# Python 3.13 elimino el modulo audioop de la stdlib y pydub (importado por
+# Gradio 3) lo necesita. Colab lo trae hoy, pero no esta garantizado.
+audioop-lts; python_version >= "3.13"
