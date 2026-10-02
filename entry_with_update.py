@@ -89,4 +89,12 @@ else:
         print(f'[Update] No se pudo comprobar actualizaciones: {e}')
         print('[Update] Se continua con la copia local (esto no impide arrancar Fooocus).')
 
+# Latido de UI: evita que el tunel corte el websocket durante la decodificacion VAE y
+# el guardado tras el ultimo paso. No es critico, nunca debe impedir el arranque.
+try:
+    from modules import ui_keepalive
+    ui_keepalive.install()
+except Exception as e:
+    print(f'[Compat] No se pudo activar el latido de UI: {e}')
+
 from launch import *
