@@ -27,9 +27,11 @@ NO_DEPS_PACKAGES = {'gradio': '3.41.2', 'gradio_client': '0.5.0'}
 OPTIONAL_REQUIREMENTS_FILE = 'requirements_optional.txt'
 INSTALL_OPTIONAL_FLAG = '--install-optional'
 
-# Colab actualiza sus paquetes con frecuencia. Preferir wheels evita compilaciones
-# de minutos y --no-build-isolation reutiliza setuptools/wheel ya presentes.
-PIP_STABLE_FLAGS = '--disable-pip-version-check --prefer-binary --no-build-isolation'
+# Colab actualiza sus paquetes con frecuencia. run_pip ya añade --prefer-binary
+# (wheels antes que compilar). No se usa --no-build-isolation: si algun paquete
+# no tiene wheel para el Python del runtime (3.13 desde agosto de 2026), la
+# compilacion necesita su propio entorno de build y sin aislamiento falla.
+PIP_STABLE_FLAGS = '--disable-pip-version-check'
 
 
 def prepare_environment():
@@ -38,7 +40,7 @@ def prepare_environment():
     print(f'Fooocus version: {fooocus_version.version}', flush=True)
 
     if REINSTALL_ALL or not is_installed('torch') or not is_installed('torchvision'):
-        torch_index_url = os.environ.get('TORCH_INDEX_URL', 'https://download.pytorch.org/whl/cu128')
+        torch_index_url = os.environ.get('TORCH_INDEX_URL', 'https://download.pytorch.org/whl/cu130')
         torch_command = os.environ.get('TORCH_COMMAND',
                                        f'pip install torch torchvision --extra-index-url {torch_index_url}')
         run(f'"{python}" -m {torch_command}', 'Installing torch and torchvision',
@@ -155,5 +157,12 @@ if not config.model_filenames:
     print('[Fooocus] No hay checkpoint. Descárgalo aparte con aria2c en models/checkpoints.', flush=True)
     print(f'[Fooocus] Nombre esperado: {config.default_base_model_name}', flush=True)
     print('!' * 72, flush=True)
+elif config.default_base_model_name not in config.model_filenames:
+    # Sin esto default_pipeline revienta al importar con FileNotFoundError porque
+    # intenta cargar un checkpoint que no existe.
+    fallback = config.model_filenames[0]
+    print(f'[Fooocus] "{config.default_base_model_name}" no esta en models/checkpoints; '
+          f'se usa "{fallback}".', flush=True)
+    config.default_base_model_name = fallback
 init_cache(config.model_filenames, config.paths_checkpoints, config.lora_filenames, config.paths_loras)
 from webui import *
