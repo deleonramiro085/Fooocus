@@ -1,87 +1,146 @@
-# Fooocus Colab Edition 2.6 - Auditoria y arreglos
+# Fooocus Colab Edition - Auditoria, arreglos y guia de mantenimiento
 
-Auditoria de este fork contra el runtime **actual** de Google Colab
-(Ubuntu 22.04, **Python 3.12**, numpy 2.0.2, torch 2.11 + cu128).
+Version actual: **2.6.1** (ver `fooocus_version.py`).
+Runtime objetivo: Colab con **Python 3.12**, numpy 2.0.2, torch 2.11 + cu128,
+Gradio **3.41.2** (congelado) sobre starlette/fastapi/pydantic degradados.
 
-## El fallo principal: `returncode=-9`
+## Changelog
+
+### 2.6.1 - UI congelada al final de cada imagen (Colab, oct 2026)
+
+**Sintoma.** Se genera la imagen, el preview se congela hacia el paso 22 de 26,
+los botones no responden y F5 no lo arregla. Las imagenes SI se guardan (carpeta
+`outputs/` e historial) y el proceso sigue vivo. En la consola aparece, entre la
+imagen 1 y la 2:
+
+    'AsyncRequest' object has no attribute '_json_response_data'
+
+y al final NO aparece `Total time: N seconds`.
+
+**Causa raiz (verificada en el codigo de gradio 3.41.2, `gradio/queueing.py` y
+`gradio/utils.py`).** La cola de Gradio 3 no invoca al generador directamente:
+por CADA yield (cada preview) hace un POST HTTP a `{server_path}api/predict`
+con un `httpx.AsyncClient` creado sin timeout explicito, es decir con el timeout
+por defecto de httpx: **5 segundos**. Fooocus tiene pausas largas sin ningun
+yield (VAE, guardar imagen, `Moving model(s)`, preparar la tarea 2/2). Si el
+POST espera mas de 5 s, httpx lanza `ReadTimeout`; `AsyncRequest.__run` se traga
+la excepcion y deja el objeto sin `_json_response_data`; el bucle
+`while response.json.get('is_generating')` de `Queue.process_events` revienta
+con el AttributeError de arriba, el `print(e)` lo muestra y la cola da el evento
+por terminado. El worker (otro hilo) sigue, pero nadie le envia nada al navegador.
+
+**Arreglos (todos en `modules/compat.py::_patch_gradio_queue`, se aplican al
+arrancar y lo confirman tres lineas `[Compat]` en el log):**
+
+1. `Queue.start` sustituye `queue_client` por `httpx.AsyncClient(timeout=None)`.
+   **Este es el arreglo que resuelve el fallo.**
+2. `Queue.set_url` fuerza `server_path` a `http://127.0.0.1:<puerto>/`. Sin esto,
+   cada paso del sampler sale a internet y vuelve por la URL publica del tunel.
+3. `Queue.send_message` sube su timeout de 1 s a 30 s. Con 1 s, un websocket
+   lento hacia que Gradio diera al cliente por muerto.
+
+**Cambios complementarios:**
+
+- `colab_run.py`: cloudflared se lanza con `--protocol http2` (el QUIC/UDP por
+  defecto se degrada en Colab).
+- `colab_run.py`: `FOOOCUS_PREVIEW_MAX_SIDE` por defecto 512 px (antes 768).
+- `colab_run.py`: clase `HealthProbe`. Cada 10 s consulta el servidor local y
+  el tunel y escribe `[Salud HH:MM:SS] LOCAL|TUNEL sin respuesta` solo cuando
+  cambia el estado. `LOCAL` caido = servidor bloqueado; solo `TUNEL` caido =
+  problema de red/Cloudflare.
+- `fooocus_colab.ipynb`: el `git reset` usa `FETCH_HEAD` tras `git fetch --depth 1
+  <repo> <rama>`. Antes usaba `origin/<rama>`, que no existe en un clon shallow de
+  otra rama (error `exit status 128` al cambiar `BRANCH`).
+
+**Como verificar que funciona.** En el log debe verse, al arrancar:
+
+    [Compat] Cola de Gradio apunta a http://127.0.0.1:7865/ (loopback), no al tunel.
+    [Compat] Cola de Gradio sin timeout de 5 s en las peticiones del generador.
+
+y tras generar 2 imagenes debe aparecer `Total time: N seconds` y NO el
+AttributeError de `_json_response_data`.
+
+### 2.6.0 - Fallo `returncode=-9` (OOM) y celda sin logs
+
+Ver la seccion siguiente.
+
+## Guia de diagnostico (si Colab cambia otra vez)
+
+Empieza por el log de la celda. Mira esto, en este orden:
+
+| Lo que ves | Significa | Donde mirar |
+|---|---|---|
+| La celda muere sin traceback, `returncode=-9` | OOM killer, falta RAM del sistema | `args_manager._autotune_memory_policy`, `colab_run.explain_exit` |
+| `'AsyncRequest' object has no attribute '_json_response_data'` | Una peticion de la cola de Gradio fallo (timeout/red) | `modules/compat.py::_patch_gradio_queue`; busca la excepcion real envolviendo `AsyncRequest.__run` |
+| Imagenes guardadas pero falta `Total time:` | El generador `generate_clicked` de `webui.py` no termino: la UI se desconecto | igual que arriba; el `Total time` solo se imprime cuando llega el evento `finish` |
+| `[Salud] LOCAL sin respuesta` | Servidor bloqueado (GIL, hilo colgado) | hilos del worker en `modules/async_worker.py` |
+| Solo `[Salud] TUNEL sin respuesta` | Tunel caido; probar `TUNEL = 'gradio'` | `colab_run.start_cloudflare_tunnel` |
+| `AttributeError: module 'numpy' has no attribute ...` | API retirada en numpy 2 | `_patch_numpy` |
+| Errores de `torch.cuda.amp`, `weights_only`, `get_autocast_gpu_dtype` | API retirada en torch nuevo | `_patch_torch` |
+| `Image.ANTIALIAS` y similares | Pillow 10+ | `_patch_pillow` |
+| Error al importar gradio, starlette, pydantic, httpx | Colab actualizo el stack web | `requirements_versions.txt`, `launch.py` |
+
+Metodo general que funciono en este caso:
+
+1. No adivinar: leer el codigo EXACTO de la version de la libreria instalada
+   (gradio 3.41.2) y seguir la ruta del error hasta su origen. Un mensaje como
+   `no attribute '_json_response_data'` es un sintoma; la excepcion real estaba
+   silenciada dentro de `AsyncRequest.__run`.
+2. Una senal "tiene que aparecer" en el log (`Total time`) es mejor prueba de
+   que algo funciona que una impresion visual de la UI.
+3. Los parches viven en el repo (`compat.py`, `colab_run.py`), nunca en la celda:
+   un `git pull` propaga el arreglo sin repegar codigo.
+4. Probar en una rama y pasar a `main` solo tras confirmar. En Colab, para cambiar
+   de rama con un clon viejo: `!rm -rf /content/Fooocus` y volver a ejecutar la celda.
+
+Si la capa web de Gradio 3 sigue dando problemas, la salida rapida es fijar el
+runtime de Colab (Entorno de ejecucion > Cambiar tipo de entorno > Runtime Version
+> **2025.07**, Python 3.11 + torch 2.6), mucho mas cercano al entorno original de
+Fooocus 2.5.x. La salida de fondo es migrar a Gradio 4+, pero implica reescribir
+`modules/gradio_hijack.py` y buena parte de `webui.py`.
+
+## Fallo 2.6.0: `returncode=-9`
 
 Sintoma: la celda arranca, imprime la URL del tunel, y muere. Sin traceback.
-Lo unico visible es `CompletedProcess(..., returncode=-9)`. Las imagenes si
-aparecen en `outputs/` y en el historial.
+Lo unico visible era `CompletedProcess(..., returncode=-9)`. Las imagenes si
+aparecian en `outputs/`.
 
-`-9` es **SIGKILL**: el proceso no fallo, lo **mato el kernel de Linux** por
-quedarse sin **RAM del sistema** (OOM killer). Esto es clave: un OOM de VRAM
-(CUDA) siempre deja traceback con `torch.cuda.OutOfMemoryError`. Aqui no hay
-ninguno, luego el problema nunca estuvo en la GPU.
+`-9` es **SIGKILL**: lo **mato el kernel de Linux** por quedarse sin **RAM del
+sistema** (OOM killer). Un OOM de VRAM (CUDA) siempre deja traceback con
+`torch.cuda.OutOfMemoryError`.
 
 ### Causa raiz
 
-En Colab la GPU tiene **mas VRAM que RAM tiene la maquina**: un T4 son 15 GiB
-de VRAM contra ~12.7 GiB de RAM. Y la configuracion por defecto usaba la RAM
-como zona de descarga de la VRAM:
+En Colab la GPU tiene mas VRAM que RAM la maquina: un T4 son 15 GiB de VRAM
+contra ~12.7 GiB de RAM. La configuracion por defecto usaba la RAM como zona de
+descarga:
 
-1. `args_manager.py` derivaba
-   `always_offload_from_vram = not disable_offload_from_vram`, es decir **True**
-   salvo que se pase el flag.
-2. `model_management.py` lo lee como `ALWAYS_VRAM_OFFLOAD = True`, y al no pasar
-   ninguna politica de VRAM el estado se queda en `NORMAL_VRAM`. Con esa
-   combinacion:
-   - `unet_inital_load_device()` devuelve **cpu** de forma incondicional,
-   - `unet_offload_device()` devuelve **cpu**,
-   - `free_memory()` pierde su corto circuito
-     (`if get_free_memory(device) > memory_required: break`), asi que descarga
-     **todos** los modelos y `unpatch_model()` copia los pesos de vuelta a RAM
-     tras cada pasada.
-3. Un checkpoint SDXL de ~6.5 GiB, mas su page cache, mas UNet/CLIP/VAE
-   materializados en RAM, mas el modelo de expansion de prompt, se pasan de los
-   12.7 GiB. SIGKILL.
-
-Esto explica el patron exacto: antes sobrevivia la primera carga y se congelaba
-sobre el paso 30 (presion de RAM justo cuando toca descargar), un reinicio
-soltaba el page cache y funcionaba una vez.
+1. `args_manager.py` derivaba `always_offload_from_vram = not disable_offload_from_vram`
+   (True por defecto).
+2. `model_management.py` lo lee como `ALWAYS_VRAM_OFFLOAD = True`; con
+   `NORMAL_VRAM`, `unet_inital_load_device()` y `unet_offload_device()` devuelven
+   cpu, y `free_memory()` descarga todos los modelos, copiando los pesos a RAM.
+3. Un SDXL de ~6.5 GiB mas page cache, UNet/CLIP/VAE y el modelo de expansion
+   de prompt superan los 12.7 GiB. SIGKILL.
 
 ### Arreglo
 
-`args_manager.py` autoajusta la politica de memoria: si la VRAM es >= 90% de la
-RAM del sistema y nadie eligio politica a mano, activa `--always-high-vram` y
-`--disable-offload-from-vram`, de modo que los pesos se quedan **residentes en
-VRAM** en vez de ir y volver a RAM. Se anuncia por consola. Se desactiva con
-`FOOOCUS_DISABLE_VRAM_AUTOTUNE=1`.
+`args_manager.py` autoajusta: si la VRAM es >= 90% de la RAM y nadie eligio
+politica, activa `--always-high-vram` y `--disable-offload-from-vram`. Se anuncia
+por consola y se desactiva con `FOOOCUS_DISABLE_VRAM_AUTOTUNE=1`. `colab_run.py`
+pasa ademas los flags, respetando cualquier flag de VRAM de `ARGUMENTOS_EXTRA`.
 
-`colab_run.py` pasa ademas los flags de forma explicita, respetando cualquier
-flag de VRAM que se ponga en `ARGUMENTOS_EXTRA` (son un grupo mutuamente
-excluyente de argparse).
+### Celda sin logs
 
-## El segundo fallo: la celda no mostraba logs
+La celda antigua usaba `subprocess.run(cmd)` sin tuberia; el hijo heredaba el fd 1
+real del kernel, no el stream de la celda. `colab_run.py` canaliza stdout+stderr,
+reimprime linea a linea, vigila la RAM (avisa al 85% y 95%) y traduce el codigo
+de salida.
 
-La celda antigua lanzaba Fooocus con `subprocess.run(cmd)` sin tuberia. El hijo
-hereda el **descriptor 1 real** del kernel, que no es el stream que pinta la
-celda de Colab (ipykernel solo sustituye `sys.stdout` dentro del proceso). Toda
-la salida de Fooocus acababa en el log del runtime, invisible: de ahi que la
-unica linea fuera el `repr` de `CompletedProcess`. Se estaba depurando a ciegas.
+### Otros
 
-Ahora `colab_run.py` canaliza stdout+stderr y reimprime linea a linea, añade un
-watchdog de RAM que avisa al 85% y al 95% y guarda el pico, y traduce el codigo
-de salida a lenguaje humano (`-9` explica el OOM y que hacer).
-
-## Otros arreglos
-
-- `presets/default.json` traia `default_steps`, que **no existe** como clave de
-  configuracion: `modules/config.py` nunca la lee, por eso seguian saliendo 30
-  pasos. La clave real es `default_overwrite_step`, ya corregida a 26.
-- La celda se reduce a actualizar el repo y llamar a `colab_run.main()`, para que
-  los proximos arreglos lleguen por `git pull` sin repegar codigo en Colab.
-
-## Nota sobre el stack web
-
-La UI sigue en Gradio 3.41.2 (agosto 2023) sostenida por los parches de
-`modules/compat.py`, y `requirements_versions.txt` degrada starlette, fastapi,
-websockets, transformers, tokenizers y pydantic respecto a lo que trae Colab.
-Funciona, pero es deuda tecnica: cada actualizacion de Colab puede romper el
-siguiente eslabon. Si algun dia aparece un error nuevo en la capa web y no en la
-generacion, la salida rapida es fijar el runtime en Colab
-(Entorno de ejecucion > Cambiar tipo de entorno > Runtime Version > **2025.07**,
-Python 3.11 + torch 2.6), mucho mas cercano al entorno original de Fooocus 2.5.x.
+- `presets/default.json`: `default_steps` no existe; la clave real es
+  `default_overwrite_step` (26).
 
 ## Formato de imagen WebP vs PNG
 
