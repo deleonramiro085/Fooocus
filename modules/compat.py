@@ -182,23 +182,27 @@ def _patch_gradio():
 
 
 def _patch_gradio_queue():
-    """Arregla el congelado de la UI detras de un tunel (Cloudflare, ngrok...).
+    """Arregla el congelado de la UI (la causa real de 'AsyncRequest ... _json_response_data').
 
     En gradio 3.41 la cola (`gradio.queueing.Queue`) no llama a la funcion del
     generador directamente: por CADA paso (cada preview) hace un POST HTTP a
-    `{server_path}api/predict`, y al terminar un POST a `{server_path}reset`.
-    `server_path` se toma de la URL con la que entra el navegador, o sea la URL
-    PUBLICA del tunel. Cada paso del sampler sale a internet y vuelve por
-    Cloudflare. Cuando una de esas peticiones se retrasa o falla:
-      - `send_message` tiene timeout=1 s; si el websocket tarda mas, da al cliente
-        por muerto, deja de enviarle datos y la UI se queda congelada mientras el
-        worker sigue generando y guardando las imagenes;
-      - `reset_iterators` falla con
-        "'AsyncRequest' object has no attribute '_json_response_data'" y el estado
-        del iterador queda sucio.
-    Se fuerza server_path a loopback (el servidor se habla a si mismo) y se sube el
-    timeout de send_message a 30 s.
+    `{server_path}api/predict` con un `httpx.AsyncClient` creado SIN timeout
+    explicito, o sea con el timeout por defecto de httpx: 5 segundos.
+
+    Fooocus tiene pausas largas sin ningun yield (decodificar el VAE, guardar la
+    imagen, 'Moving model(s)', preparar la tarea 2/2). Si una peticion espera mas
+    de 5 s, httpx lanza ReadTimeout, AsyncRequest se traga la excepcion y deja el
+    objeto sin `_json_response_data`. El bucle `while response.json.get(...)` de
+    `Queue.process_events` revienta entonces con
+    "'AsyncRequest' object has no attribute '_json_response_data'", la cola da el
+    evento por terminado y la UI se queda congelada aunque el worker siga
+    generando y guardando las imagenes.
+
+    Se reemplaza el cliente por uno sin timeout. Ademas se fuerza server_path a
+    loopback (para que los pasos no salgan por el tunel publico) y se sube el
+    timeout de send_message de 1 a 30 s.
     """
+    import httpx
     from gradio import queueing
 
     queue_class = queueing.Queue
@@ -225,7 +229,18 @@ def _patch_gradio_queue():
         return await original_send_message(self, event, data, timeout=timeout)
 
     queue_class.send_message = send_message
+
+    original_start = queue_class.start
+
+    async def start(self, ssl_verify=True):
+        await original_start(self, ssl_verify)
+        # call_prediction lee self.queue_client en cada llamada, asi que basta con
+        # sustituirlo aqui por un cliente sin limite de espera.
+        self.queue_client = httpx.AsyncClient(verify=ssl_verify, timeout=httpx.Timeout(None))
+
+    queue_class.start = start
     queue_class._fooocus_patched = True
+    print('[Compat] Cola de Gradio sin timeout de 5 s en las peticiones del generador.', flush=True)
     return
 
 
