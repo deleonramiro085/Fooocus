@@ -1,7 +1,7 @@
-"""Capa de compatibilidad con runtimes modernos (Python 3.13 / numpy 2.x / torch >= 2.6).
+"""Capa de compatibilidad con runtimes modernos (Python 3.12/3.13 / numpy 2.x / torch >= 2.6).
 
 Fooocus 2.5.x nacio con Python 3.10, numpy 1.26 y torch 2.1. El runtime actual de
-Google Colab es Python 3.13 con numpy 2.x y torch >= 2.6, donde varias APIs que
+Google Colab usa numpy 2.x y torch >= 2.6, donde varias APIs que
 usan Fooocus y sus dependencias (facexlib, rembg, groundingdino, torchsde) ya no
 existen. Aqui se re-exponen las que se pueden emular sin cambiar el resultado
 numerico. Se aplica una sola vez, al arrancar, desde launch.py.
@@ -10,6 +10,7 @@ numerico. Se aplica una sola vez, al arrancar, desde launch.py.
 import functools
 import os
 import platform
+import re
 import sys
 import types
 
@@ -114,9 +115,7 @@ def _patch_gradio():
        tanto el preview como la miniatura final.
 
     2. `encode_array_to_base64` serializa el array como PNG a resolucion completa. Con
-       896x1152 son ~2 MB por paso de sampler; sobre un tunel el websocket se satura y
-       el ultimo mensaje (`results`, el que pinta la miniatura) se pierde sin error.
-       Reescalar a 768 px y usar JPEG deja el mensaje en ~50 KB.
+       896x1152 son ~2 MB por paso de sampler; reescalar y usar JPEG lo deja en ~50 KB.
     """
     import base64
     from io import BytesIO
@@ -182,6 +181,54 @@ def _patch_gradio():
     return
 
 
+def _patch_gradio_queue():
+    """Arregla el congelado de la UI detras de un tunel (Cloudflare, ngrok...).
+
+    En gradio 3.41 la cola (`gradio.queueing.Queue`) no llama a la funcion del
+    generador directamente: por CADA paso (cada preview) hace un POST HTTP a
+    `{server_path}api/predict`, y al terminar un POST a `{server_path}reset`.
+    `server_path` se toma de la URL con la que entra el navegador, o sea la URL
+    PUBLICA del tunel. Cada paso del sampler sale a internet y vuelve por
+    Cloudflare. Cuando una de esas peticiones se retrasa o falla:
+      - `send_message` tiene timeout=1 s; si el websocket tarda mas, da al cliente
+        por muerto, deja de enviarle datos y la UI se queda congelada mientras el
+        worker sigue generando y guardando las imagenes;
+      - `reset_iterators` falla con
+        "'AsyncRequest' object has no attribute '_json_response_data'" y el estado
+        del iterador queda sucio.
+    Se fuerza server_path a loopback (el servidor se habla a si mismo) y se sube el
+    timeout de send_message a 30 s.
+    """
+    from gradio import queueing
+
+    queue_class = queueing.Queue
+    if getattr(queue_class, '_fooocus_patched', False):
+        return
+
+    port = os.environ.get('FOOOCUS_LOCAL_PORT')
+    if not port:
+        match = re.search(r'--port[= ]+(\d+)', ' '.join(sys.argv))
+        port = match.group(1) if match else None
+
+    if port:
+        local_url = f'http://127.0.0.1:{port}/'
+
+        def set_url(self, url):
+            self.server_path = local_url
+
+        queue_class.set_url = set_url
+        print(f'[Compat] Cola de Gradio apunta a {local_url} (loopback), no al tunel.', flush=True)
+
+    original_send_message = queue_class.send_message
+
+    async def send_message(self, event, data, timeout=30):
+        return await original_send_message(self, event, data, timeout=timeout)
+
+    queue_class.send_message = send_message
+    queue_class._fooocus_patched = True
+    return
+
+
 def _patch_torch():
     import torch
 
@@ -224,7 +271,7 @@ def _patch_pillow():
 
 
 def apply_compatibility_patches():
-    for patch in (_patch_numpy, _patch_torch, _patch_pillow, _patch_gradio):
+    for patch in (_patch_numpy, _patch_torch, _patch_pillow, _patch_gradio, _patch_gradio_queue):
         try:
             patch()
         except Exception as e:
