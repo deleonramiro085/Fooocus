@@ -1,7 +1,7 @@
-"""Capa de compatibilidad con runtimes modernos (Python 3.13 / numpy 2.x / torch >= 2.6).
+"""Capa de compatibilidad con runtimes modernos (Python 3.12/3.13 / numpy 2.x / torch >= 2.6).
 
 Fooocus 2.5.x nacio con Python 3.10, numpy 1.26 y torch 2.1. El runtime actual de
-Google Colab es Python 3.13 con numpy 2.x y torch >= 2.6, donde varias APIs que
+Google Colab usa numpy 2.x y torch >= 2.6, donde varias APIs que
 usan Fooocus y sus dependencias (facexlib, rembg, groundingdino, torchsde) ya no
 existen. Aqui se re-exponen las que se pueden emular sin cambiar el resultado
 numerico. Se aplica una sola vez, al arrancar, desde launch.py.
@@ -10,6 +10,7 @@ numerico. Se aplica una sola vez, al arrancar, desde launch.py.
 import functools
 import os
 import platform
+import re
 import sys
 import types
 
@@ -114,9 +115,7 @@ def _patch_gradio():
        tanto el preview como la miniatura final.
 
     2. `encode_array_to_base64` serializa el array como PNG a resolucion completa. Con
-       896x1152 son ~2 MB por paso de sampler; sobre un tunel el websocket se satura y
-       el ultimo mensaje (`results`, el que pinta la miniatura) se pierde sin error.
-       Reescalar a 768 px y usar JPEG deja el mensaje en ~50 KB.
+       896x1152 son ~2 MB por paso de sampler; reescalar y usar JPEG lo deja en ~50 KB.
     """
     import base64
     from io import BytesIO
@@ -182,6 +181,69 @@ def _patch_gradio():
     return
 
 
+def _patch_gradio_queue():
+    """Arregla el congelado de la UI (la causa real de 'AsyncRequest ... _json_response_data').
+
+    En gradio 3.41 la cola (`gradio.queueing.Queue`) no llama a la funcion del
+    generador directamente: por CADA paso (cada preview) hace un POST HTTP a
+    `{server_path}api/predict` con un `httpx.AsyncClient` creado SIN timeout
+    explicito, o sea con el timeout por defecto de httpx: 5 segundos.
+
+    Fooocus tiene pausas largas sin ningun yield (decodificar el VAE, guardar la
+    imagen, 'Moving model(s)', preparar la tarea 2/2). Si una peticion espera mas
+    de 5 s, httpx lanza ReadTimeout, AsyncRequest se traga la excepcion y deja el
+    objeto sin `_json_response_data`. El bucle `while response.json.get(...)` de
+    `Queue.process_events` revienta entonces con
+    "'AsyncRequest' object has no attribute '_json_response_data'", la cola da el
+    evento por terminado y la UI se queda congelada aunque el worker siga
+    generando y guardando las imagenes.
+
+    Se reemplaza el cliente por uno sin timeout. Ademas se fuerza server_path a
+    loopback (para que los pasos no salgan por el tunel publico) y se sube el
+    timeout de send_message de 1 a 30 s.
+    """
+    import httpx
+    from gradio import queueing
+
+    queue_class = queueing.Queue
+    if getattr(queue_class, '_fooocus_patched', False):
+        return
+
+    port = os.environ.get('FOOOCUS_LOCAL_PORT')
+    if not port:
+        match = re.search(r'--port[= ]+(\d+)', ' '.join(sys.argv))
+        port = match.group(1) if match else None
+
+    if port:
+        local_url = f'http://127.0.0.1:{port}/'
+
+        def set_url(self, url):
+            self.server_path = local_url
+
+        queue_class.set_url = set_url
+        print(f'[Compat] Cola de Gradio apunta a {local_url} (loopback), no al tunel.', flush=True)
+
+    original_send_message = queue_class.send_message
+
+    async def send_message(self, event, data, timeout=30):
+        return await original_send_message(self, event, data, timeout=timeout)
+
+    queue_class.send_message = send_message
+
+    original_start = queue_class.start
+
+    async def start(self, ssl_verify=True):
+        await original_start(self, ssl_verify)
+        # call_prediction lee self.queue_client en cada llamada, asi que basta con
+        # sustituirlo aqui por un cliente sin limite de espera.
+        self.queue_client = httpx.AsyncClient(verify=ssl_verify, timeout=httpx.Timeout(None))
+
+    queue_class.start = start
+    queue_class._fooocus_patched = True
+    print('[Compat] Cola de Gradio sin timeout de 5 s en las peticiones del generador.', flush=True)
+    return
+
+
 def _patch_torch():
     import torch
 
@@ -224,7 +286,7 @@ def _patch_pillow():
 
 
 def apply_compatibility_patches():
-    for patch in (_patch_numpy, _patch_torch, _patch_pillow, _patch_gradio):
+    for patch in (_patch_numpy, _patch_torch, _patch_pillow, _patch_gradio, _patch_gradio_queue):
         try:
             patch()
         except Exception as e:

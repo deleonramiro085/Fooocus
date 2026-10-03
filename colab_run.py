@@ -3,19 +3,24 @@
 La logica de arranque vive aqui y no en la celda del notebook: asi un `git pull`
 corrige el arranque sin tener que volver a pegar codigo en Colab.
 
-Dos fallos concretos que se arreglan aqui:
+Fallos concretos que se arreglan aqui:
 
 1. La celda antigua lanzaba Fooocus con `subprocess.run(cmd)` sin tuberia. El
    proceso hijo hereda el descriptor 1 real del kernel, que NO es el stream que
-   pinta la celda de Colab (ipykernel solo sustituye sys.stdout dentro del
-   proceso). Toda la salida de Fooocus acababa en el log del runtime y la celda
-   se quedaba muda: lo unico visible era el repr de CompletedProcess. Aqui se
-   canaliza stdout+stderr y se reimprime linea a linea.
+   pinta la celda de Colab. Aqui se canaliza stdout+stderr y se reimprime.
 
-2. Se lanza con --always-high-vram y --disable-offload-from-vram. Sin ellos
-   ldm_patched usa la RAM del sistema como zona de descarga de los pesos, y en
-   un T4 (15 GiB de VRAM contra ~12.7 GiB de RAM) el OOM killer mata el proceso:
-   returncode=-9 sin una sola linea de traceback.
+2. Se lanza con --always-high-vram y --disable-offload-from-vram para que la RAM
+   del sistema no sea zona de descarga (OOM killer, returncode=-9).
+
+3. UI congelada hacia el final de la imagen (las imagenes si se guardan):
+   - cloudflared se lanza con `--protocol http2`. Por defecto usa QUIC (UDP), que
+     en Colab se degrada y deja el websocket de Gradio colgado justo cuando el
+     flujo de previews es mas denso.
+   - Los previews se reducen a 512 px por defecto (FOOOCUS_PREVIEW_MAX_SIDE).
+   - Una sonda de salud consulta el servidor local y el tunel cada pocos segundos
+     y avisa en la celda de que lado esta el fallo: `[Salud] LOCAL sin respuesta`
+     significa servidor bloqueado; `[Salud] TUNEL sin respuesta` con LOCAL OK
+     significa que el problema es solo el tunel.
 """
 
 import os
@@ -28,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 
 GIB = 1024 ** 3
 PORT = 7865
@@ -107,6 +113,65 @@ class RamWatchdog:
             self._stop.wait(self.interval)
 
 
+class HealthProbe:
+    """Distingue 'servidor bloqueado' de 'tunel caido' cuando la UI se congela.
+
+    Consulta http://127.0.0.1:PORT/ y, si hay, la URL publica. Solo escribe en la
+    celda cuando cambia el estado, para no ensuciar el log.
+    """
+
+    def __init__(self, tunnel_url=None, interval=10.0, timeout=8.0):
+        self.tunnel_url = tunnel_url
+        self.interval = interval
+        self.timeout = timeout
+        self._stop = threading.Event()
+        self._state = {}
+
+    def start(self):
+        threading.Thread(target=self._run, daemon=True).start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+
+    def _ping(self, url):
+        started = time.monotonic()
+        try:
+            with urllib.request.urlopen(url, timeout=self.timeout) as response:
+                response.read(64)
+            return True, time.monotonic() - started
+        except Exception as error:
+            return False, '{}: {}'.format(type(error).__name__, error)
+
+    def _report(self, name, ok, detail):
+        previous = self._state.get(name)
+        if previous is ok:
+            return
+        self._state[name] = ok
+        stamp = time.strftime('%H:%M:%S')
+        if ok:
+            if previous is False:
+                log('[Salud {}] {} vuelve a responder'.format(stamp, name))
+        else:
+            log('[Salud {}] {} sin respuesta ({})'.format(stamp, name, detail))
+
+    def _run(self):
+        # Espera a que el servidor arranque antes de empezar a reportar fallos.
+        while not self._stop.is_set():
+            ok, _ = self._ping('http://127.0.0.1:{}/'.format(PORT))
+            if ok:
+                self._state['LOCAL'] = True
+                break
+            self._stop.wait(3.0)
+        while not self._stop.is_set():
+            ok, detail = self._ping('http://127.0.0.1:{}/'.format(PORT))
+            self._report('LOCAL', ok, detail)
+            if self.tunnel_url:
+                ok, detail = self._ping(self.tunnel_url)
+                self._report('TUNEL', ok, detail)
+            self._stop.wait(self.interval)
+
+
 def ensure_aria2c():
     found = shutil.which('aria2c')
     if found:
@@ -171,9 +236,11 @@ def start_cloudflare_tunnel(timeout=60.0):
         log('cloudflared no se pudo instalar; se usara el enlace de Gradio.')
         return None, None
 
+    # --protocol http2: el QUIC por defecto (UDP) se degrada en Colab y deja colgado
+    # el websocket de Gradio justo en la fase de mas trafico (previews).
     proc = subprocess.Popen(
-        ['cloudflared', 'tunnel', '--no-autoupdate', '--url',
-         'http://127.0.0.1:{}'.format(PORT)],
+        ['cloudflared', 'tunnel', '--no-autoupdate', '--protocol', 'http2',
+         '--url', 'http://127.0.0.1:{}'.format(PORT)],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     lines = queue.Queue()
     threading.Thread(target=lambda: [lines.put(x) for x in proc.stdout],
@@ -222,6 +289,7 @@ def build_command(tunnel_url, extra_args):
 def stream(cmd):
     env = dict(os.environ)
     env['PYTHONUNBUFFERED'] = '1'
+    env.setdefault('FOOOCUS_PREVIEW_MAX_SIDE', '512')
     log('Ejecutando: ' + ' '.join(cmd))
     log('')
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -284,10 +352,12 @@ def main(model_url, model_filename='model.safetensors', tunnel='cloudflare',
         tunnel_url, tunnel_proc = start_cloudflare_tunnel()
 
     watchdog = RamWatchdog().start()
+    health = HealthProbe(tunnel_url).start()
     try:
         code = stream(build_command(tunnel_url, extra_args))
     finally:
         watchdog.stop()
+        health.stop()
         if tunnel_proc is not None and tunnel_proc.poll() is None:
             tunnel_proc.kill()
 
